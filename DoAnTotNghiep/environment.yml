@@ -1,0 +1,24 @@
+name: lst-thesis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - earthengine-api
+  - geemap
+  - geopandas
+  - rasterio
+  - shapely
+  - pandas
+  - numpy
+  - scikit-learn
+  - xgboost
+  - shap
+  - matplotlib
+  - jupyterlab
+  - libpysal
+  - sqlalchemy
+  - psycopg2
+  - pip
+  - pip:
+      - cdsapi
+      - geoalchemy2
