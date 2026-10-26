@@ -1,5 +1,6 @@
 // Gọi backend Node/Express. Sửa EP nếu route backend của bạn khác.
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API_BASE as BASE } from './config';
+
 export const EP = {
   register: '/api/auth/register',
   login: '/api/auth/login',

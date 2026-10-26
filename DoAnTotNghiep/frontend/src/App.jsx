@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Popup, GeoJSON } from 'react-leaflet';
 import axios from 'axios';
 import chroma from 'chroma-js';
@@ -13,9 +14,25 @@ import {
   Legend,
 } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
+import { API_BASE } from './config';
+import { isAuthed } from './authApi';
 
 // Đăng ký các module của Chart.js
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+
+// Thang màu LST dùng chung cho điểm trên bản đồ và chú giải
+const LST_COLORS = ['#313695', '#74add1', '#ffffbf', '#f46d43', '#a50026'];
+const LST_MIN = 25;
+const LST_MAX = 45;
+
+const headerLinkStyle = {
+  color: 'white',
+  textDecoration: 'none',
+  padding: '6px 14px',
+  border: '1px solid #475569',
+  borderRadius: '6px',
+  fontSize: '14px',
+};
 
 function App() {
   const [data, setData] = useState([]);
@@ -25,10 +42,11 @@ function App() {
   // dùng để vẽ boundary + phát hiện quận/huyện "không có dữ liệu"
   const [boundary, setBoundary] = useState(null);
   const [boundaryError, setBoundaryError] = useState(false);
+  const authed = isAuthed();
 
   useEffect(() => {
     // Gọi API lấy dữ liệu dự báo
-    axios.get('http://localhost:3000/api/lst-data')
+    axios.get(`${API_BASE}/api/lst-data`)
       .then(response => {
         if (response.data.status === 'success') {
           const rawData = response.data.data;
@@ -47,7 +65,7 @@ function App() {
           });
 
           const labels = Object.keys(districtStats);
-          const avgTemps = labels.map(name => (districtStats[name].sum / districtStats[name].count).toFixed(1));
+          const avgTemps = labels.map(name => Number((districtStats[name].sum / districtStats[name].count).toFixed(1)));
 
           setChartData({
             labels: labels,
@@ -71,7 +89,7 @@ function App() {
 
     // Gọi API lấy ranh giới hành chính (Tuần 12) — song song, không chặn
     // việc hiển thị các điểm dự báo nếu boundary lỗi/chưa có.
-    axios.get('http://localhost:3000/api/boundary')
+    axios.get(`${API_BASE}/api/boundary`)
       .then(response => {
         if (response.data.status === 'success') {
           setBoundary(response.data.data);
@@ -83,10 +101,13 @@ function App() {
       });
   }, []);
 
-  const colorScale = chroma.scale(['#313695', '#74add1', '#ffffbf', '#f46d43', '#a50026']).domain([25, 45]);
+  const colorScale = chroma.scale(LST_COLORS).domain([LST_MIN, LST_MAX]);
 
+  // Biểu đồ cột ngang để đọc được tên khi có nhiều quận/huyện
   const chartOptions = {
+    indexAxis: 'y',
     responsive: true,
+    maintainAspectRatio: false,
     plugins: {
       legend: { position: 'top' },
       title: { display: true, text: 'Nhiệt độ trung bình theo khu vực' },
@@ -135,13 +156,21 @@ function App() {
           <h2 style={{ margin: 0 }}>WebGIS Dự Báo Nhiệt Độ Bề Mặt Đất (LST)</h2>
           <span style={{ fontSize: '14px', color: '#cbd5e1' }}>Khu vực: TP.HCM | Sinh viên thực hiện: Nguyễn Trần Minh Khang</span>
         </div>
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <strong>Tổng số pixel dự báo: {data.length}</strong>
+          {authed ? (
+            <Link to="/account" style={headerLinkStyle}>Tài khoản</Link>
+          ) : (
+            <>
+              <Link to="/login" style={headerLinkStyle}>Đăng nhập</Link>
+              <Link to="/register" style={headerLinkStyle}>Đăng ký</Link>
+            </>
+          )}
         </div>
       </header>
 
       {/* MAIN CONTENT: Chia 2 cột */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'row' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', minHeight: 0 }}>
 
         {/* CỘT TRÁI: BẢN ĐỒ (70% CHIỀU RỘNG) */}
         <div style={{ flex: 7, position: 'relative' }}>
@@ -150,7 +179,7 @@ function App() {
               <h2>Đang tải dữ liệu không gian...</h2>
             </div>
           ) : (
-            <MapContainer center={[10.8231, 106.6297]} zoom={10} style={{ height: '100%', width: '100%' }}>
+            <MapContainer center={[10.8231, 106.6297]} zoom={10} preferCanvas style={{ height: '100%', width: '100%' }}>
               <TileLayer
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -184,8 +213,21 @@ function App() {
               })}
             </MapContainer>
           )}
+
+          {/* Chú giải thang màu LST */}
+          {!loading && (
+            <div style={{ position: 'absolute', right: 10, bottom: 30, zIndex: 1000, background: 'rgba(255,255,255,0.92)', padding: '8px 12px', borderRadius: '6px', fontSize: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.25)' }}>
+              <div style={{ marginBottom: 4, fontWeight: 600 }}>LST dự báo (°C)</div>
+              <div style={{ width: 160, height: 10, borderRadius: 3, background: `linear-gradient(to right, ${LST_COLORS.join(', ')})` }} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+                <span>{LST_MIN}</span>
+                <span>{LST_MAX}</span>
+              </div>
+            </div>
+          )}
+
           {boundaryError && (
-            <div style={{ position: 'absolute', bottom: 10, left: 10, background: '#fef2f2', color: '#991b1b', padding: '6px 12px', borderRadius: '6px', fontSize: '13px', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}>
+            <div style={{ position: 'absolute', bottom: 10, left: 10, zIndex: 1000, background: '#fef2f2', color: '#991b1b', padding: '6px 12px', borderRadius: '6px', fontSize: '13px', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}>
               ⚠️ Chưa tải được lớp ranh giới hành chính (kiểm tra đã chạy 09_export_to_postgis.py chưa)
             </div>
           )}
@@ -194,9 +236,11 @@ function App() {
         {/* CỘT PHẢI: BIỂU ĐỒ & THÔNG TIN (30% CHIỀU RỘNG) */}
         <div style={{ flex: 3, padding: '20px', backgroundColor: '#f8fafc', borderLeft: '2px solid #e2e8f0', overflowY: 'auto' }}>
           {chartData ? (
-            <Bar options={chartOptions} data={chartData} />
+            <div style={{ position: 'relative', height: Math.max(320, chartData.labels.length * 22) }}>
+              <Bar options={chartOptions} data={chartData} />
+            </div>
           ) : (
-            <p>Đang xử lý dữ liệu biểu đồ...</p>
+            <p>{loading ? 'Đang xử lý dữ liệu biểu đồ...' : 'Chưa có dữ liệu biểu đồ (kiểm tra backend đã chạy chưa).'}</p>
           )}
 
           <div style={{ marginTop: '40px', padding: '15px', backgroundColor: '#ffffff', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>

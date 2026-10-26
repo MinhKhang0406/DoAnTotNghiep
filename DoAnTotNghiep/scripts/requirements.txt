@@ -1,0 +1,24 @@
+# Backend LST WebGIS — thư viện cần cài:  pip install -r requirements.txt
+# Đã chạy thử với: Python 3.13 | pandas 3.0 | numpy 2.5 | geopandas 1.2 | shapely 2.2 | scikit-learn 1.9
+#                  xgboost 3.4 | shap 0.54 | matplotlib 3.11 | scipy 1.18 | esda 2.10 | libpysal 4.15
+#                  sqlalchemy 2.1 | geoalchemy2 0.20 | earthengine-api 1.7
+# Các mức "tối thiểu" bên dưới là ước lượng, CHƯA thử trên bản cũ hơn.
+
+earthengine-api>=0.1.390
+pandas>=2.0
+numpy>=1.24
+geopandas>=0.14
+shapely>=2.0
+pyogrio>=0.7
+scipy>=1.10
+scikit-learn>=1.3
+xgboost>=2.0
+shap>=0.44
+matplotlib>=3.7
+# Local Moran's I (04, bước ghép cặp). Thiếu 2 gói này thì 04 chỉ bỏ qua bước Moran (có in cảnh báo).
+esda>=2.5
+libpysal>=4.9
+# Đẩy vào PostGIS (09)
+sqlalchemy>=2.0
+geoalchemy2>=0.14
+psycopg2-binary>=2.9

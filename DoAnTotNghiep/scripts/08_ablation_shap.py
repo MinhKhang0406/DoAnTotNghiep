@@ -1,29 +1,21 @@
 """
 BƯỚC 8 — ABLATION STUDY (mở rộng) + SHAP
 ===========================================
-CẬP NHẬT 2026-09-09 — đồng bộ với 03_prepare_features.py bản mới:
-  - `delta_t` GIỜ NẰM TRONG FEATURES (đúng đề cương mới nhất — bài toán
-    "dự báo linh hoạt", xem 03_prepare_features.py). Vì delta_t là feature
-    trung tâm của thiết kế mới, BỔ SUNG thêm 1 kịch bản ablation để CHỨNG
-    MINH BẰNG SỐ nó thực sự có đóng góp: "Đầy đủ, không có delta_t" so với
-    "Đầy đủ (Full Model)".
-  - ERA5-Land không còn lag t-1/t-3/t-7 (03 đã bỏ) -> era5_cols giờ chỉ còn
-    5 biến tại t, không phải 5x4=20 cột như bản trước.
-  - classify_season()/classify_surface() chuyển sang dùng chung từ
-    03_prepare_features.py (thay vì định nghĩa riêng ở đây) — để
-    07_compute_suhii.py dùng lại đúng 1 định nghĩa "bề mặt xây dựng/thực
-    vật/mặt nước", tránh 2 nơi lệch nhau.
+Đánh giá PHÂN TẦNG trên cùng 1 model đã huấn luyện đầy đủ (không train riêng
+từng mùa/bề mặt): (1) ablation theo nhóm biến (+ kịch bản "không có delta_t"),
+(2) mùa mưa (5-11) / mùa khô (12-4), (3) loại bề mặt (Nước / Xây dựng / Thực vật),
+(4) SHAP.
 
-Giữ nguyên từ bản trước (đã đúng, không cần sửa):
-  (1) Ablation theo nhóm biến (viễn thám / khí tượng / đầy đủ)
-  (2) So sánh mùa mưa (5-11) / mùa khô (12-4) — đánh giá riêng model "Đầy
-      đủ" trên từng nhóm mẫu theo mùa.
-  (3) So sánh theo loại bề mặt (Nước / Xây dựng / Thực vật) — đánh giá
-      riêng model "Đầy đủ" trên từng nhóm.
-  Đây là ĐÁNH GIÁ PHÂN TẦNG (stratified evaluation) trên cùng 1 model đã
-  huấn luyện đầy đủ — không train model riêng cho từng mùa/bề mặt (giữ
-  đúng tinh thần "1 model duy nhất, phân tích ở đâu nó mạnh/yếu" thường
-  dùng trong ablation study).
+CẬP NHẬT 2026-10-19:
+  - LƯU kết quả ra ../data/ablation_results.csv và ../data/shap_importance.csv
+    (trước chỉ in màn hình + 1 ảnh PNG) để WebGIS Tuần 13 vẽ biểu đồ Feature
+    Importance/so sánh nhóm biến từ CSDL (09 đẩy vào các bảng ablation_results,
+    shap_importance).
+  - MÙA tính theo ngày NHÃN (date_target, ngày được dự báo) khi có cột đó — đúng ý
+    "hiệu năng dự báo mùa mưa vs mùa khô"; bản cũ dùng date_t (ngày làm đầu vào).
+  - Bỏ qua gọn gàng khi 1 nhóm trống (vd chưa có mẫu 'Xây dựng') thay vì crash.
+  - Giữ nguyên: classify_season/classify_surface dùng chung từ 03; vá tương thích
+    xgboost>=3 + shap (base_score dạng chuỗi JSON list).
 """
 
 import importlib.util
@@ -49,30 +41,14 @@ _spec.loader.exec_module(prepare_features)
 
 FEATURES = prepare_features.FEATURE_COLS
 TARGET = "LST_target"
+RESULTS = []
 
 
 def _fix_xgboost_base_score_for_shap(model):
-    """Vá lỗi tương thích xgboost>=3.0 + shap cũ: xgboost mới lưu base_score
-    dạng chuỗi JSON list (vd '[47.74468]') thay vì số thực đơn — khiến
-    shap.TreeExplainer ném ValueError: could not convert string to float
-    khi ép float() trực tiếp (lỗi đã biết, xem shap/shap#4288).
-
-    SỬA LỖI (2026-10-02): bản trước dò theo đường dẫn cố định
-    config["learner"]["learner_model_param"]["base_score"] rồi round-trip
-    save_config/load_config — ĐàXÁC NHẬN KHÔNG ăn thua trên máy thật (traceback
-    vẫn y hệt lỗi gốc "could not convert string to float: '[4.7923004E1]'"),
-    nhiều khả năng do bản xgboost cài trên máy lồng cấu trúc config khác đi,
-    KeyError bị try/except nuốt mất nên fix không chạy, hoặc load_config()
-    không "dính" khi SHAP tự gọi lại save_config() ở nơi khác.
-
-    Cách sửa mới, chắc ăn hơn: KHÔNG sửa trong config rồi hy vọng nó được đọc
-    lại đúng chỗ — thay vào đó GHI ĐÈ trực tiếp phương thức save_config() của
-    CHÍNH booster này (chỉ instance này, không đụng tới class/booster khác),
-    để BẤT KỲ chỗ nào bên trong SHAP gọi booster.save_config() (dù gọi ở đâu,
-    qua đường nào) đều nhận lại chuỗi JSON đã sửa sẵn base_score — không phụ
-    thuộc phải biết trước SHAP/xgboost lồng key này ở path nào. Dò ĐỆ QUY
-    toàn bộ config tìm MỌI key "base_score" dạng chuỗi JSON-array, không chỉ
-    1 đường dẫn cố định, nên vẫn ăn được dù cấu trúc đổi khác giữa các bản."""
+    """Vá lỗi tương thích xgboost>=3.0 + shap: base_score lưu dạng chuỗi JSON list
+    (vd '[47.74468]') khiến shap.TreeExplainer ném ValueError. Ghi đè save_config()
+    của CHÍNH booster này, dò ĐỆ QUY mọi key "base_score" dạng chuỗi JSON-array —
+    không phụ thuộc đường dẫn cấu hình cố định (xem shap/shap#4288)."""
     try:
         booster = model.get_booster()
         _original_save_config = booster.save_config
@@ -99,12 +75,29 @@ def _fix_xgboost_base_score_for_shap(model):
     return model
 
 
-def evaluate(y_true, y_pred, label):
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
+def evaluate(y_true, y_pred, label, section):
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    r2 = float(r2_score(y_true, y_pred))
     print(f"| {label:<28} | {rmse:<7.3f} | {mae:<7.3f} | {r2:<7.3f} |")
+    RESULTS.append({"section": section, "group": label, "rmse": rmse, "mae": mae, "r2": r2, "n": int(len(y_true))})
     return rmse, mae, r2
+
+
+def _strat(title, labels_order, strat_series, y_test, model, X_test, section):
+    print("\n" + "=" * 65)
+    print(f" {title}")
+    print("=" * 65)
+    print(f"| {'Nhóm':<28} | {'RMSE':<7} | {'MAE':<7} | {'R²':<7} |")
+    print("-" * 65)
+    for s in labels_order:
+        mask = np.asarray(strat_series == s)
+        n = int(mask.sum())
+        if n >= 2:
+            evaluate(y_test[mask], model.predict(X_test[mask]), f"{s} (n={n})", section)
+        else:
+            print(f"| {s:<28} | không đủ mẫu trong tập Test (n={n}) |")
+    print("=" * 65)
 
 
 def main():
@@ -116,11 +109,13 @@ def main():
     except FileNotFoundError:
         print("❌ Lỗi: Không tìm thấy file CSV. Vui lòng kiểm tra lại Bước 4.")
         return
+    if len(train_df) == 0 or len(test_df) == 0:
+        raise SystemExit("❌ Train hoặc test_temporal RỖNG — xem lại Bước 4.")
 
     y_train = train_df[TARGET]
     y_test = test_df[TARGET]
 
-    era5_cols = prepare_features.ERA5_VARS  # chỉ còn 5 biến tại t, không lag
+    era5_cols = prepare_features.ERA5_VARS  # 5 biến tại t, không lag
     features_no_delta = [f for f in FEATURES if f != "delta_t"]
     ablation_scenarios = {
         "Chỉ dùng Viễn thám": ["LST_t", "NDVI", "NDBI", "NDWI"],
@@ -139,48 +134,39 @@ def main():
     for name, feats in ablation_scenarios.items():
         model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42, n_jobs=-1)
         model.fit(train_df[feats], y_train)
-        y_pred = model.predict(test_df[feats])
-        evaluate(y_test, y_pred, name)
+        evaluate(y_test, model.predict(test_df[feats]), name, "Nhóm biến")
         if name == "Đầy đủ (Full Model)":
-            full_model = model
-            X_test_full = test_df[feats]
+            full_model, X_test_full = model, test_df[feats]
     print("=" * 65)
 
-    # ============ (2) SO SÁNH MÙA MƯA / MÙA KHÔ ============
-    print("\n" + "=" * 65)
-    print(" (2) ĐÁNH GIÁ MODEL ĐẦY ĐỦ THEO MÙA (trên tập Test)")
-    print("=" * 65)
-    print(f"| {'Mùa':<28} | {'RMSE':<7} | {'MAE':<7} | {'R²':<7} |")
-    print("-" * 65)
-    season = prepare_features.classify_season(test_df["date_t"])
-    for s in ["Mùa mưa", "Mùa khô"]:
-        mask = season == s
-        if mask.sum() > 0:
-            evaluate(y_test[mask], full_model.predict(X_test_full[mask]), f"{s} (n={mask.sum()})")
-        else:
-            print(f"| {s:<28} | không có mẫu trong tập Test |")
-    print("=" * 65)
+    # (2) Mùa — theo ngày NHÃN (ngày được dự báo) nếu có
+    season_date_col = "date_target" if "date_target" in test_df.columns else "date_t"
+    season = pd.Series(prepare_features.classify_season(test_df[season_date_col]), index=test_df.index)
+    _strat(f"(2) MODEL ĐẦY ĐỦ THEO MÙA (mùa của {season_date_col}, tập Test)",
+           ["Mùa mưa", "Mùa khô"], season, y_test, full_model, X_test_full, "Mùa")
 
-    # ============ (3) SO SÁNH THEO LOẠI BỀ MẶT ============
-    print("\n" + "=" * 65)
-    print(" (3) ĐÁNH GIÁ MODEL ĐẦY ĐỦ THEO LOẠI BỀ MẶT (trên tập Test)")
-    print("=" * 65)
-    print(f"| {'Loại bề mặt':<28} | {'RMSE':<7} | {'MAE':<7} | {'R²':<7} |")
-    print("-" * 65)
-    surface = prepare_features.classify_surface(test_df)
-    for s in ["Mặt nước", "Xây dựng", "Thực vật"]:
-        mask = surface == s
-        if mask.sum() > 0:
-            evaluate(y_test[mask], full_model.predict(X_test_full[mask]), f"{s} (n={mask.sum()})")
-        else:
-            print(f"| {s:<28} | không có mẫu trong tập Test |")
-    print("=" * 65)
+    # (3) Loại bề mặt (phân loại tại t từ NDVI/NDBI/NDWI)
+    surface = pd.Series(prepare_features.classify_surface(test_df), index=test_df.index)
+    _strat("(3) MODEL ĐẦY ĐỦ THEO LOẠI BỀ MẶT (tập Test)",
+           ["Mặt nước", "Xây dựng", "Thực vật"], surface, y_test, full_model, X_test_full, "Bề mặt")
+
+    pd.DataFrame(RESULTS).to_csv(os.path.join(data_dir, "ablation_results.csv"), index=False)
+    print(f"\n✅ Đã lưu {os.path.join(data_dir, 'ablation_results.csv')}")
 
     # ============ SHAP ============
     print("\nĐang tính toán giá trị SHAP (Feature Importance)...")
     _fix_xgboost_base_score_for_shap(full_model)
     explainer = shap.TreeExplainer(full_model)
     shap_values = explainer.shap_values(X_test_full)
+
+    imp = pd.DataFrame({
+        "feature": X_test_full.columns,
+        "mean_abs_shap": np.abs(shap_values).mean(axis=0),
+    }).sort_values("mean_abs_shap", ascending=False)
+    imp["rank"] = np.arange(1, len(imp) + 1)
+    imp["share_pct"] = (imp["mean_abs_shap"] / imp["mean_abs_shap"].sum() * 100).round(2)
+    imp.to_csv(os.path.join(data_dir, "shap_importance.csv"), index=False)
+    print(imp.to_string(index=False))
 
     plt.ioff()
     plt.figure(figsize=(10, 8))
@@ -189,7 +175,7 @@ def main():
     shap_out_path = os.path.join(data_dir, "shap_summary_plot.png")
     plt.savefig(shap_out_path, bbox_inches="tight", dpi=300)
     plt.close()
-    print(f"✅ Đã lưu biểu đồ SHAP tại: {shap_out_path}")
+    print(f"✅ Đã lưu biểu đồ SHAP tại: {shap_out_path} và shap_importance.csv")
     print(f"   (với {len(FEATURES)} feature, gồm cả delta_t — giới hạn hiển thị 15 biến quan trọng nhất)")
 
 

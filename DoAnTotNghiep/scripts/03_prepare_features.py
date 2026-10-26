@@ -1,119 +1,284 @@
 """
 BƯỚC 3 (module lõi) — Trích xuất đặc trưng Landsat / Sentinel-2 / ERA5-Land
 ============================================================================
-File này là MODULE DÙNG CHUNG — 04, 07, 08 import trực tiếp từ đây, không
-copy lại logic, để tránh 2 nơi lệch nhau.
+File này là MODULE DÙNG CHUNG — 04, 07, 08, 10, qa_overlay.py, các script
+check_/diagnose_ import trực tiếp từ đây, không copy lại logic.
 
-CẬP NHẬT 2026-09-18 — sửa 2 lỗi phát hiện khi review lại toàn bộ backend:
-  1. `_mask_s2_clouds_full`: bản trước ép `ee.Image(image.get("cloud_prob"))`
-     NGAY khi gán biến rồi mới đưa vào `ee.Algorithms.If` để test — nếu
-     ngày nào S2_SR_HARMONIZED không có ảnh S2_CLOUD_PROBABILITY khớp
-     system:index (join không ra kết quả), ép ee.Image(null) lỗi ngay tại
-     bước tính condition, trước khi If kịp rẽ nhánh false -> văng exception,
-     mất nguyên ngày đó. Sửa: test property gốc trước, ép kiểu Image chỉ ở
-     nhánh true.
-  2. `mask_landsat_c2l2`: z-score cục bộ (reduceNeighborhood) bản trước
-     tính trên lst_c CHƯA mask mây/bóng mây/bão hòa/bất định -> mean/std
-     hàng xóm dùng để tính z-score bị lẫn pixel mây trong cửa sổ 5x5. Sửa:
-     mask các lỗi thô đó trước, mới tính z-score trên ảnh đã sạch mây.
+CẬP NHẬT 2026-10-19 (review toàn bộ luồng lấy dữ liệu) — các thay đổi chính:
 
-CẬP NHẬT 2026-09-09 — đồng bộ lại với bản đề cương mới nhất (ChinhSua):
+  1. S2 CHỐNG RÒ RỈ TƯƠNG LAI: bản cũ lấy cửa sổ [t-3, t+3] quanh t. Với
+     delta_t = 1..3 ngày thì ảnh S2 chụp SAU ngày nhãn (t+delta_t) vẫn lọt vào
+     feature -> rò rỉ tương lai (đề cương cấm). Giờ cửa sổ mặc định là
+     [t - S2_BACK_DAYS, t + S2_FWD_DAYS] = [t-3, t] (S2_FWD_DAYS = 0, TUYỆT ĐỐI
+     không nhìn về sau t). Nếu muốn giữ "±3" đúng chữ đề cương thì đặt
+     S2_FWD_DAYS=3 NHƯNG khi đó 04 tự chặn thêm: fwd = min(fwd, delta_t - 1)
+     để ảnh S2 không bao giờ chụp sau ngày nhãn. (Khuyến nghị: sửa đề cương
+     thành "3 ngày trước t" cho khớp code. Lý do thứ hai để giữ fwd = 0: khi
+     DỰ BÁO THẬT ở thời điểm t thì ảnh S2 sau t chưa tồn tại — 10_build_inference_grid.py
+     luôn dùng fwd = 0, nên huấn luyện với fwd > 0 sẽ lệch với lúc triển khai.)
+  2. S2/ERA5 RỖNG KHÔNG CÒN LÀM VĂNG CẢ NGÀY: bản cũ nếu cửa sổ S2 không có ảnh
+     nào thì s2.median() ra ảnh 0 băng -> normalizedDifference ném exception ->
+     MẤT CẢ NGÀY t. ERA5 chưa phát hành (ERA5-Land trên GEE trễ vài tháng) thì
+     .first() = null -> cũng văng. Giờ cả hai trả về ảnh bị mask hoàn toàn (đúng
+     tinh thần "không nội suy, pixel thiếu thì loại khỏi mẫu").
+  3. S2 thêm mặt nạ bóng mây/lỗi bằng dải SCL (class 3 = cloud shadow,
+     1 = saturated/defective) — s2cloudless chỉ bắt mây, không bắt bóng mây.
+     QA60 giữ lại theo đề cương (lưu ý: ESA không còn điền QA60 cho sản phẩm
+     mới từ đầu 2022 nên từ lúc đó mặt nạ mây S2 thực tế chỉ còn s2cloudless +
+     SCL — chưa tự kiểm chứng được trong môi trường của tôi, hãy xem lại trang
+     dataset trên GEE catalog).
+  4. RESAMPLE BILINEAR: .resample() phải đặt trên ẢNH ĐẦU VÀO (ảnh có projection
+     cố định). Bản cũ gọi .resample() trên ảnh composite (median) / ảnh đã tính
+     biểu thức — composite không có projection cố định nên lệnh này nhiều khả
+     năng không có tác dụng và S2 vẫn rơi về nearest-neighbor. Giờ resample gắn
+     vào từng ảnh S2 TRƯỚC khi median, và gắn vào ảnh ERA5 gốc TRƯỚC khi tính
+     biểu thức. Không còn .reproject() ép tính toán trên cả ROI — lưới EPSG:32648
+     30 m được chỉ định ngay lúc lấy mẫu tại điểm (reduce_at_points).
+  5. mask_landsat_c2l2: thêm tham số apply_zscore (False khi chỉ cần biết "ngày
+     có ảnh hay không", nhẹ hơn rất nhiều), max_st_unc_k (mặc định 3.0 K — bản
+     cũ 2.0 K; ST_QA ở vùng ẩm nhiệt đới và bề mặt đô thị thường lớn hơn nên
+     ngưỡng 2 K dễ loại thiên lệch pixel đô thị; đo bằng
+     diagnose_mask_components.py rồi chỉnh), xuất thêm dải ST_UNC_K để phân tích.
+  6. BỔ SUNG helper dùng chung: ee_retry, reduce_at_points (lấy giá trị tại danh
+     sách điểm — thay cho stratifiedSample), list_landsat_scene_times (liệt kê
+     ngày chụp chỉ bằng metadata, không tính pixel), get_collection_max_date
+     (biết ERA5/Landsat có dữ liệu tới đâu), load_districts (dissolve + district_idx
+     ổn định + diện tích), load_boundary_roi (ROI đã đơn giản hóa, payload nhỏ).
 
-  1. BÀI TOÁN DỰ BÁO: đổi từ "t+7 cố định + cửa sổ dung sai t+5..t+9" sang
-     "dự báo linh hoạt cho kỳ quan sát khả dụng tiếp theo" (next available
-     observation). Biến delta_t (số ngày từ t đến kỳ ảnh tiếp theo) giờ là
-     1 FEATURE trong FEATURE_COLS (không còn bị loại như bản trước) — đúng
-     mục 3 "Đối tượng và phạm vi nghiên cứu" của đề cương: "Biến thời gian
-     (Delta t)... được đưa vào mô hình như một đặc trưng (feature) độc lập
-     giúp mô hình nhận thức được khoảng thời gian dự báo xa hay gần."
-
-  2. BỎ ERA5-Land lag t-1/t-3/t-7 — đề cương bản này CHỈ nói lấy ERA5-Land
-     "tại thời điểm hiện tại t" (mục 3, vai trò dữ liệu ERA5-Land), không hề
-     nhắc tới độ trễ nào cả. Giữ lag sẽ khiến feature set (và cả % feature
-     importance trong SHAP) không khớp với những gì đề cương mô tả.
-
-  3. Sửa cửa sổ khớp thời gian ERA5: bản trước dùng ±90 phút nhưng lại ghi
-     comment nhầm là khớp "±1 giờ" — 1 giờ = 60 phút, không phải 90. Đổi lại
-     đúng ±60 phút như đề cương ghi ở mục Phương pháp hợp nhất dữ liệu.
-
-  4. Sentinel-2 (NDVI/NDBI/NDWI): BỔ SUNG `.resample("bilinear")` trước khi
-     `.reproject()` — bản trước thiếu bước này nên mặc định dùng nearest-
-     neighbor cho biến liên tục, sai với đề cương ("dùng phương pháp
-     resample bilinear cho biến liên tục (NDVI, NDBI, biến khí tượng)").
-     ERA5 vốn đã gọi `.resample("bilinear")` đúng rồi, giữ nguyên.
-
-  5. BỔ SUNG lọc ngoại lệ thống kê (z-score cục bộ không gian) cho Landsat
-     LST — đúng đề cương, phần xử lý nhiễu loại (2) "lỗi cảm biến":
-     "...lọc ngoại lệ thống kê theo z-score/IQR trong từng cửa sổ không
-     gian--thời gian cục bộ". Cài đặt: focal window (reduceNeighborhood)
-     bán kính 2 pixel (~60m ở lưới 30m, tương đương cửa sổ 5x5) để tính
-     trung bình + độ lệch chuẩn cục bộ, loại pixel lệch quá `zscore_threshold`
-     độ lệch chuẩn (mặc định 3.0). ĐÃ GIẢM bán kính từ 5 xuống 2 pixel so
-     với thử nghiệm đầu tiên — bán kính 5 (cửa sổ 11x11) làm phép tính
-     reduceNeighborhood quá nặng trên ROI lớn (TP.HCM mới gộp cả Bình
-     Dương + BR-VT), gây lỗi "Computation timed out" của GEE khi chạy
-     đồng thời trên nhiều ảnh (check_filter_stages.py, 04_build_dataset.py).
-     Bán kính 2 vẫn đủ bắt các "đốm" giá trị bất hợp lý cục bộ, chỉ nhẹ
-     tính toán hơn nhiều. Đây là z-score CỤC BỘ KHÔNG GIAN (trong 1 ảnh/1
-     thời điểm) — KHÔNG mở rộng sang trục thời gian (so giữa các ngày khác
-     nhau), vì LST biến động mạnh theo ngày do nắng/mưa thực tế, z-score
-     theo thời gian dễ loại nhầm biến động thời tiết thật thành "nhiễu".
-     Nêu rõ lựa chọn thiết kế này khi viết mục 3.2 báo cáo. Đề cương ghi
-     "z-score/IQR" (một trong hai), dùng z-score là đủ.
-
-  6. classify_season()/classify_surface() chuyển từ 08_ablation_shap.py về
-     đây làm hàm DÙNG CHUNG — để 07_compute_suhii.py (SUHII) và 08 (ablation)
-     dùng chung đúng 1 định nghĩa "bề mặt xây dựng/thực vật/mặt nước", tránh
-     2 nơi định nghĩa lệch nhau.
-
-  7. BỔ SUNG get_valid_landsat_dates() — hàm DÙNG CHUNG để lấy danh sách
-     ngày Landsat hợp lệ, CHIA NHỎ theo từng quý (mặc định 3 tháng/đợt) rồi
-     gọi GEE riêng từng đợt thay vì gọi .getInfo() một lần cho toàn bộ
-     khoảng thời gian — tránh lỗi "Computation timed out" khi ROI lớn +
-     nhiều ảnh (>1000 ảnh, nhiều năm). check_filter_stages.py,
-     check_t7_pairing.py, 04_build_dataset.py đều dùng chung hàm này thay
-     vì mỗi nơi tự viết lại 1 kiểu (từng gây lệch logic "valid pixel" giữa
-     các script trước đây).
-
-Giữ nguyên từ bản trước (đã đúng, không cần sửa):
-  - Sentinel-2 dùng S2_SR_HARMONIZED (Surface Reflectance) + s2cloudless
-    kết hợp QA60.
-  - Landsat: mask mây/bóng mây/dilated cloud qua QA_PIXEL bitwise +
-    QA_RADSAT (lỗi cảm biến bão hòa) + giới hạn vật lý -10..60°C + ST_QA
-    (độ bất định nhiệt độ) <= 2K.
+Giữ nguyên từ bản trước (đã đúng): Sentinel-2 dùng S2_SR_HARMONIZED +
+s2cloudless; Landsat mask QA_PIXEL (bit 1/3/4) + QA_RADSAT + giới hạn vật lý
+-10..60°C; z-score cục bộ bán kính 2 pixel trên ảnh đã mask mây; ERA5 chỉ tại t,
+cửa sổ ±60 phút; classify_season/classify_surface dùng chung.
 """
 
 import re
 import unicodedata
+from datetime import datetime, timezone
 
 import ee
 import numpy as np
+import pandas as pd
+
+CRS_UTM = "EPSG:32648"
+GRID_SCALE_M = 30
+DEFAULT_MAX_ST_UNC_K = 3.0
+S2_BACK_DAYS = 3
+S2_FWD_DAYS = 0
 
 
 def normalize_vn_name(text: str) -> str:
     """Chuẩn hóa tên riêng tiếng Việt (bỏ dấu, khoảng trắng, gạch nối, hạ
     chữ thường) để so khớp KHÔNG phụ thuộc cách nguồn dữ liệu ghi tên — vd
-    GADM ghi tỉnh/thành/quận/huyện viết LIỀN không khoảng trắng kiểu
-    "HồChíMinh"/"BìnhDương" (đã xác nhận thực tế khi chạy 01), trong khi
-    code có thể hard-code so sánh kiểu "Can Gio"/"Cu Chi" (không dấu, có
-    khoảng trắng) — nếu so trực tiếp .isin()/== sẽ KHÔNG BAO GIỜ khớp.
-    Dùng hàm này ở CẢ 2 phía (dữ liệu thật + danh sách lọc) trước khi so
-    sánh. Dùng chung cho 01 (lọc tỉnh/thành) và 04 (lọc quận/huyện spatial
-    test)."""
+    GADM ghi viết LIỀN không khoảng trắng kiểu "HồChíMinh"/"BìnhDương", trong
+    khi code có thể hard-code "Can Gio"/"Cu Chi". Dùng ở CẢ 2 phía trước khi
+    so sánh. GIỮ chữ số (bản cũ xóa luôn chữ số nên "Quận 1", "Quận 3", "Quận 12"
+    đều thành "quan" và bị coi là MỘT đơn vị khi so khớp tên)."""
     if not isinstance(text, str):
         return ""
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     text = text.replace("đ", "d").replace("Đ", "D")
-    text = re.sub(r"[^a-zA-Z]", "", text)
+    text = re.sub(r"[^a-zA-Z0-9]", "", text)
     return text.lower()
+
+
+# ---------------------------------------------------------------------
+# TIỆN ÍCH CHUNG CHO EARTH ENGINE
+# ---------------------------------------------------------------------
+
+def ee_retry(fn, tries: int = 4, base_sleep: float = 5.0, label: str = ""):
+    """Chạy fn() (thường là lambda: x.getInfo()), thử lại với backoff khi GEE
+    báo lỗi tạm thời (429 / 'Too many concurrent' / timeout / 5xx). Lỗi logic
+    (band không tồn tại, cú pháp...) vẫn ném ra sau lần thử cuối."""
+    import time
+
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - GEE ném nhiều loại exception khác nhau
+            last = e
+            msg = str(e).lower()
+            transient = any(
+                k in msg
+                for k in ("timed out", "timeout", "429", "too many", "quota", "503", "500", "unavailable", "reset")
+            )
+            if attempt == tries or not transient:
+                break
+            wait = base_sleep * (2 ** (attempt - 1))
+            print(f"   ⚠️  GEE lỗi tạm thời{(' (' + label + ')') if label else ''}: {str(e)[:90]} -> thử lại sau {wait:.0f}s ({attempt}/{tries})")
+            time.sleep(wait)
+    raise last
+
+
+def init_ee(project_id: str) -> None:
+    try:
+        ee.Initialize(project=project_id)
+    except Exception:
+        print("Chưa xác thực hoặc chưa Initialize được — chạy Authenticate...")
+        ee.Authenticate()
+        ee.Initialize(project=project_id)
+    print(f"✅ Earth Engine sẵn sàng (project: {project_id})")
+
+
+def _masked_image(band_names: list) -> "ee.Image":
+    """Ảnh bị mask HOÀN TOÀN với đúng các băng band_names — dùng làm nhánh
+    'không có dữ liệu' của ee.Algorithms.If để lấy mẫu ra null (bị loại khỏi
+    dataset) thay vì ném exception làm mất cả ngày."""
+    return (
+        ee.Image.constant([0] * len(band_names))
+        .rename(band_names)
+        .toFloat()
+        .updateMask(ee.Image.constant(0))
+    )
+
+
+def reduce_at_points(
+    image: "ee.Image",
+    pts: pd.DataFrame,
+    band_names: list,
+    id_col: str = "point_id",
+    lon_col: str = "lon",
+    lat_col: str = "lat",
+    scale: float = GRID_SCALE_M,
+    crs: str = CRS_UTM,
+    chunk_size: int = 2000,
+    tile_scale: int = 4,
+    label: str = "",
+) -> pd.DataFrame:
+    """Lấy giá trị của `image` tại danh sách điểm `pts` (lưới EPSG:32648, 30 m).
+
+    Thay cho stratifiedSample(): GEE chỉ tính pixel tại đúng các điểm cần lấy
+    (nhẹ hơn rất nhiều so với tính cả ROI ~6772 km² x 30 m) và KHÔNG bao giờ
+    'bốc trúng pixel bị mây rồi loại' làm hụt số mẫu theo quận. Pixel bị mask
+    -> giá trị NaN (để phía gọi tự dropna). Chia lô chunk_size điểm/lần vì
+    getInfo() giới hạn 5000 feature."""
+    if len(pts) == 0:
+        return pd.DataFrame(columns=[id_col] + list(band_names))
+
+    rows = []
+    for start in range(0, len(pts), chunk_size):
+        part = pts.iloc[start : start + chunk_size]
+        feats = [
+            ee.Feature(ee.Geometry.Point([float(lo), float(la)]), {id_col: int(pid)})
+            for pid, lo, la in zip(part[id_col], part[lon_col], part[lat_col])
+        ]
+        fc = ee.FeatureCollection(feats)
+        out = image.reduceRegions(
+            collection=fc, reducer=ee.Reducer.first(), scale=scale, crs=crs, tileScale=tile_scale
+        )
+        info = ee_retry(lambda: out.getInfo(), label=label)
+        for f in info.get("features", []):
+            props = f.get("properties", {})
+            rec = {id_col: props.get(id_col)}
+            for b in band_names:
+                v = props.get(b)
+                if v is None and len(band_names) == 1:
+                    v = props.get("first")  # ảnh 1 băng: GEE đặt tên thuộc tính theo reducer
+                rec[b] = v
+            rows.append(rec)
+
+    df = pd.DataFrame(rows, columns=[id_col] + list(band_names))
+    for b in band_names:
+        df[b] = pd.to_numeric(df[b], errors="coerce")
+    df[id_col] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
+    return df
+
+
+def get_collection_max_date(collection_id: str, roi: "ee.Geometry" = None):
+    """Ngày (YYYY-MM-DD, UTC) của bản ghi MỚI NHẤT trong collection — để biết
+    ERA5-Land / Landsat đã có dữ liệu tới đâu. ERA5-Land trên GEE phát hành
+    trễ vài tháng nên ngày t gần đây có thể chưa có ERA5 (trước đây âm thầm
+    bị loại, giờ phát hiện và báo rõ)."""
+    col = ee.ImageCollection(collection_id)
+    if roi is not None:
+        col = col.filterBounds(roi)
+    last = col.limit(1, "system:time_start", False).first()
+    ms = ee_retry(lambda: last.get("system:time_start").getInfo(), label=f"max_date {collection_id}")
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------
+# RANH GIỚI: đơn vị phân vùng không gian ổn định + ROI nhẹ cho GEE
+# ---------------------------------------------------------------------
+
+def load_districts(geojson_path: str):
+    """Đọc ranh giới, sửa polygon lỗi, GỘP (dissolve) các feature cùng
+    (ADM1_NAME, ADM2_NAME) thành 1 đơn vị, gán district_idx ỔN ĐỊNH (sắp theo
+    tên, không phụ thuộc thứ tự trong file) và tính district_area_km2.
+
+    Lý do dissolve: diagnose_boundary.py cho thấy có tên bị TÁCH nhiều
+    feature (đảo/mảnh) — nếu mỗi mảnh là 1 'quận' riêng thì thống kê theo quận
+    và chia spatial-test đều sai. Trả về GeoDataFrame EPSG:4326 với cột
+    ADM1_NAME, ADM2_NAME, district_idx, district_area_km2, geometry."""
+    import geopandas as gpd
+
+    gdf = gpd.read_file(geojson_path)
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+    gdf = gdf.to_crs("EPSG:4326")
+    if "ADM2_NAME" not in gdf.columns:
+        raise ValueError("Ranh giới thiếu cột ADM2_NAME — chạy lại 01_setup_gee_boundary.py.")
+    if "ADM1_NAME" not in gdf.columns:
+        gdf["ADM1_NAME"] = ""
+    gdf["ADM1_NAME"] = gdf["ADM1_NAME"].fillna("")
+
+    try:
+        gdf["geometry"] = gdf.geometry.make_valid()
+    except Exception:
+        gdf["geometry"] = gdf.geometry.buffer(0)
+
+    gdf = gdf.dissolve(by=["ADM1_NAME", "ADM2_NAME"], as_index=False)[["ADM1_NAME", "ADM2_NAME", "geometry"]]
+    gdf = gdf.sort_values(["ADM1_NAME", "ADM2_NAME"]).reset_index(drop=True)
+    gdf["district_idx"] = range(len(gdf))
+    gdf["district_area_km2"] = gdf.to_crs(CRS_UTM).geometry.area / 1e6
+    return gdf
+
+
+def load_boundary_geom(geojson_path: str) -> "ee.Geometry":
+    """ROI đầy đủ (polygon chi tiết). NẶNG khi nhúng vào request GEE — chỉ dùng
+    cho các script chẩn đoán cũ; luồng chính dùng load_boundary_roi()."""
+    import json
+
+    with open(geojson_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return ee.FeatureCollection(data).geometry()
+
+
+def load_boundary_roi(geojson_path: str, simplify_deg: float = 0.005, buffer_deg: float = 0.01) -> "ee.Geometry":
+    """ROI ĐƠN GIẢN HÓA (hợp các quận, simplify ~500 m, buffer ~1 km) chỉ để
+    filterBounds trên GEE. Bản cũ nhúng polygon GADM chi tiết (hàng MB) vào MỌI
+    request -> chậm và dễ chạm giới hạn kích thước request. Giá trị pixel luôn
+    được lấy tại các điểm trong khung lấy mẫu (nằm trong ranh giới thật) nên
+    ROI này không ảnh hưởng độ chính xác."""
+    from shapely.geometry import mapping
+
+    gdf = load_districts(geojson_path)
+    union = gdf.geometry.union_all() if hasattr(gdf.geometry, "union_all") else gdf.unary_union
+    simple = union.simplify(simplify_deg, preserve_topology=True).buffer(buffer_deg)
+    return ee.Geometry(mapping(simple))
+
 
 # ---------------------------------------------------------------------
 # LANDSAT: lọc mây/bóng mây + lỗi cảm biến (QA_RADSAT + z-score cục bộ) +
-#          giới hạn vật lý
+#          giới hạn vật lý + độ bất định ST_QA
 # ---------------------------------------------------------------------
 
-def mask_landsat_c2l2(image: "ee.Image", zscore_threshold: float = 3.0, focal_radius_px: int = 2) -> "ee.Image":
+def mask_landsat_c2l2(
+    image: "ee.Image",
+    zscore_threshold: float = 3.0,
+    focal_radius_px: int = 2,
+    apply_zscore: bool = True,
+    max_st_unc_k: float = DEFAULT_MAX_ST_UNC_K,
+) -> "ee.Image":
+    """Trả về ảnh có dải LST_C (°C) và ST_UNC_K (K), đã mask.
+
+    apply_zscore=False: bỏ bước z-score cục bộ (reduceNeighborhood x2 — phần nặng
+    nhất, nguyên nhân chính gây 'Computation timed out'). Dùng khi chỉ cần biết
+    ngày nào có pixel hợp lệ. Khi trích dữ liệu thật luôn để True.
+    max_st_unc_k=None: không lọc theo ST_QA."""
     qa = image.select("QA_PIXEL")
     cloud_shadow_bit = 1 << 4
     cloud_bit = 1 << 3
@@ -132,45 +297,37 @@ def mask_landsat_c2l2(image: "ee.Image", zscore_threshold: float = 3.0, focal_ra
         .subtract(273.15)
         .rename("LST_C")
     )
-    st_uncertainty_k = image.select("ST_QA").multiply(0.01)
-    uncertainty_mask = st_uncertainty_k.lte(2.0)
+    st_unc_k = image.select("ST_QA").multiply(0.01).rename("ST_UNC_K")
     range_mask = lst_c.gte(-10).And(lst_c.lte(60))
 
-    # SỬA LỖI (2026-09-18): mask các lỗi "thô" (mây/bóng mây/bão hòa/bất
-    # định/ngoài khoảng vật lý) TRƯỚC khi tính z-score cục bộ. Bản trước
-    # reduceNeighborhood chạy trên lst_c CHƯA mask mây -> mean/std hàng xóm
-    # dùng để tính z-score bị lẫn cả pixel mây trong cửa sổ 5x5, làm ngưỡng
-    # z-score kém chính xác (mây làm lệch mean/std cục bộ, có thể che mất
-    # đốm lỗi cảm biến thật hoặc ngược lại loại nhầm pixel hợp lệ cạnh mây).
-    # reduceNeighborhood tự bỏ qua pixel đã bị mask khi tính reducer, nên
-    # chỉ cần updateMask(pre_mask) trước là đủ, không cần đổi gì khác.
-    pre_mask = cloud_mask.And(radsat_mask).And(uncertainty_mask).And(range_mask)
-    lst_c_clean = lst_c.updateMask(pre_mask)
+    pre_mask = cloud_mask.And(radsat_mask).And(range_mask)
+    if max_st_unc_k is not None:
+        pre_mask = pre_mask.And(st_unc_k.lte(max_st_unc_k))
 
-    # Nhiễu loại (2) bổ sung — lọc ngoại lệ thống kê z-score CỤC BỘ KHÔNG
-    # GIAN: so mỗi pixel với trung bình + độ lệch chuẩn của các pixel lân
-    # cận (đã sạch mây) trong bán kính focal_radius_px (cùng 1 ảnh/thời
-    # điểm). Bắt được các "đốm" giá trị bất hợp lý do lỗi cảm biến mà
-    # QA_RADSAT/ST_QA bỏ sót.
-    kernel = ee.Kernel.square(radius=focal_radius_px, units="pixels")
-    local_mean = lst_c_clean.reduceNeighborhood(reducer=ee.Reducer.mean(), kernel=kernel)
-    local_std = lst_c_clean.reduceNeighborhood(reducer=ee.Reducer.stdDev(), kernel=kernel)
-    z_score = lst_c_clean.subtract(local_mean).divide(local_std.max(0.01)).abs()
-    zscore_mask = z_score.lte(zscore_threshold)
+    if apply_zscore:
+        # z-score CỤC BỘ KHÔNG GIAN trên ảnh ĐÃ mask các lỗi thô (mây/bão hòa/
+        # bất định/ngoài khoảng vật lý) — reduceNeighborhood tự bỏ qua pixel
+        # đã bị mask khi tính mean/std hàng xóm.
+        lst_c_clean = lst_c.updateMask(pre_mask)
+        kernel = ee.Kernel.square(radius=focal_radius_px, units="pixels")
+        local_mean = lst_c_clean.reduceNeighborhood(reducer=ee.Reducer.mean(), kernel=kernel)
+        local_std = lst_c_clean.reduceNeighborhood(reducer=ee.Reducer.stdDev(), kernel=kernel)
+        z_score = lst_c_clean.subtract(local_mean).divide(local_std.max(0.01)).abs()
+        final_mask = pre_mask.And(z_score.lte(zscore_threshold))
+    else:
+        final_mask = pre_mask
 
-    final_mask = pre_mask.And(zscore_mask)
-    return image.addBands(lst_c).updateMask(final_mask)
+    return image.addBands(lst_c).addBands(st_unc_k).updateMask(final_mask)
 
 
-def build_landsat_collection(aoi_geom: "ee.Geometry", start: str, end: str) -> "ee.ImageCollection":
+def build_landsat_collection(aoi_geom: "ee.Geometry", start: str, end: str, **mask_kwargs) -> "ee.ImageCollection":
     l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(aoi_geom).filterDate(start, end)
     l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2").filterBounds(aoi_geom).filterDate(start, end)
-    return l8.merge(l9).sort("system:time_start").map(mask_landsat_c2l2)
+    return l8.merge(l9).sort("system:time_start").map(lambda im: mask_landsat_c2l2(im, **mask_kwargs))
 
 
 def _add_months(dt: "datetime", months: int) -> "datetime":
-    """Cộng tháng cho 1 datetime, tự xử lý tràn năm/ngày cuối tháng — viết
-    tay để khỏi phụ thuộc thêm gói python-dateutil."""
+    """Cộng tháng cho 1 datetime, tự xử lý tràn năm/ngày cuối tháng."""
     month_index = dt.month - 1 + months
     year = dt.year + month_index // 12
     month = month_index % 12 + 1
@@ -180,6 +337,46 @@ def _add_months(dt: "datetime", months: int) -> "datetime":
     return dt.replace(year=year, month=month, day=day)
 
 
+def list_landsat_scene_times(
+    roi: "ee.Geometry",
+    start: str,
+    end: str,
+    chunk_months: int = 6,
+    max_scene_cloud: float = 100.0,
+    verbose: bool = True,
+) -> dict:
+    """{ 'YYYY-MM-DD': system:time_start (ms, UTC) của cảnh SỚM NHẤT trong ngày }
+    cho mọi cảnh Landsat 8/9 chạm ROI giữa start và end.
+
+    CHỈ ĐỌC METADATA (aggregate_array) — không tính pixel nên rất nhanh, không
+    timeout. Đây là danh sách NGÀY ỨNG VIÊN; 'ngày hợp lệ' (có đủ pixel sạch)
+    được xác định ở 04 bằng số điểm lấy mẫu hợp lệ thực tế.
+    max_scene_cloud < 100: bỏ cảnh có CLOUD_COVER (cả cảnh) >= ngưỡng (mặc
+    định 100 = tắt, vì tiêu chí 'hợp lệ' của đồ án là theo PIXEL, không theo %
+    mây cả cảnh)."""
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
+    out = {}
+    cursor = start_dt
+    while cursor < end_dt:
+        chunk_end = min(_add_months(cursor, chunk_months), end_dt)
+        a, b = cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(a, b)
+        l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2").filterBounds(roi).filterDate(a, b)
+        col = l8.merge(l9)
+        if max_scene_cloud < 100:
+            col = col.filter(ee.Filter.lt("CLOUD_COVER", max_scene_cloud))
+        times = ee_retry(lambda: col.aggregate_array("system:time_start").getInfo(), label=f"scene_times {a}")
+        for ms in times:
+            d = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            if d not in out or ms < out[d]:
+                out[d] = int(ms)
+        if verbose:
+            print(f"   [{a} -> {b}] {len(times)} cảnh")
+        cursor = chunk_end
+    return dict(sorted(out.items()))
+
+
 def get_valid_landsat_dates(
     roi: "ee.Geometry",
     start: str,
@@ -187,20 +384,18 @@ def get_valid_landsat_dates(
     count_scale: float = 100,
     chunk_months: int = 3,
     verbose: bool = True,
+    apply_zscore: bool = False,
+    max_st_unc_k: float = DEFAULT_MAX_ST_UNC_K,
 ) -> list:
-    """Danh sách các ngày (YYYY-MM-DD) có ít nhất 1 pixel Landsat hợp lệ
-    (sau mask_landsat_c2l2) trong roi, giữa start và end.
+    """Danh sách các ngày có ít nhất 1 pixel Landsat hợp lệ trong roi (giữ lại
+    cho check_filter_stages.py / check_t7_pairing.py). CHIA NHỎ theo
+    `chunk_months` tháng để tránh 'Computation timed out'.
 
-    CHIA NHỎ theo từng đợt `chunk_months` tháng (mặc định 1 quý) rồi gọi
-    .getInfo() RIÊNG cho từng đợt — KHÔNG gọi 1 lần cho toàn bộ khoảng thời
-    gian, vì với ROI lớn (TP.HCM mới, gộp cả Bình Dương + BR-VT) và nhiều
-    năm dữ liệu (>1000 ảnh), gộp 1 lần rất dễ bị GEE trả lỗi "Computation
-    timed out" (giới hạn ~5 phút/request đồng bộ của Earth Engine).
-    Dùng CHUNG cho check_filter_stages.py, check_t7_pairing.py và
-    04_build_dataset.py — để "ngày nào tính là hợp lệ" luôn nhất quán giữa
-    lúc kiểm tra và lúc build dataset thật."""
-    from datetime import datetime
-
+    ⚠️ Khác bản cũ: mặc định apply_zscore=False (nhẹ hơn nhiều; việc 'ngày có ảnh
+    hay không' gần như không phụ thuộc z-score). Luồng chính (04) KHÔNG dùng
+    hàm này nữa mà xác định ngày hợp lệ theo độ phủ thực tế của các điểm lấy
+    mẫu — chính xác hơn vì phân biệt được ngày chỉ phủ 1 dải mỏng ở rìa ROI
+    (path/row khác) với ngày phủ phần lớn ROI."""
     start_dt = datetime.strptime(start, "%Y-%m-%d")
     end_dt = datetime.strptime(end, "%Y-%m-%d")
 
@@ -213,7 +408,9 @@ def get_valid_landsat_dates(
 
         l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(c_start_str, c_end_str)
         l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2").filterBounds(roi).filterDate(c_start_str, c_end_str)
-        merged = l8.merge(l9).map(mask_landsat_c2l2)
+        merged = l8.merge(l9).map(
+            lambda im: mask_landsat_c2l2(im, apply_zscore=apply_zscore, max_st_unc_k=max_st_unc_k)
+        )
         merged = merged.map(lambda img: img.set("date_str", img.date().format("YYYY-MM-dd")))
 
         def _has_valid_pixel(img):
@@ -225,30 +422,30 @@ def get_valid_landsat_dates(
         checked = merged.map(_has_valid_pixel).filter(ee.Filter.gt("valid_pixel_count", 0))
 
         try:
-            chunk_dates = sorted(set(checked.aggregate_array("date_str").getInfo()))
+            chunk_dates = sorted(set(ee_retry(lambda: checked.aggregate_array("date_str").getInfo())))
         except Exception as e:
             print(
                 f"   ⚠️  Lỗi ở đợt {c_start_str} -> {c_end_str}: {str(e)[:150]}"
-                f" -> thử lại đợt này với chunk_months nhỏ hơn (vd 1), hoặc bỏ qua nếu chỉ 1 đợt lẻ bị lỗi."
+                f" -> thử lại đợt này với chunk_months nhỏ hơn (vd 1)."
             )
             chunk_dates = []
 
         all_valid_dates.extend(chunk_dates)
         if verbose:
             print(f"   [{c_start_str} -> {c_end_str}] {len(chunk_dates)} ngày hợp lệ")
-
         cursor = chunk_end_dt
 
     return sorted(set(all_valid_dates))
 
 
 # ---------------------------------------------------------------------
-# SENTINEL-2: Surface Reflectance + QA60 kết hợp s2cloudless, resample
-#             bilinear trước khi đưa về lưới 30m (biến liên tục)
+# SENTINEL-2: Surface Reflectance + QA60 + s2cloudless + SCL; cửa sổ CHỈ
+#             LÙI về quá khứ (không nhìn sau t); resample bilinear trên ẢNH ĐẦU VÀO
 # ---------------------------------------------------------------------
 
 S2_SR_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 S2_CLOUD_PROB_COLLECTION = "COPERNICUS/S2_CLOUD_PROBABILITY"
+S2_BANDS = ["B3", "B4", "B8", "B11"]
 
 
 def _join_s2_with_cloud_prob(roi: "ee.Geometry", start: "ee.Date", end: "ee.Date") -> "ee.ImageCollection":
@@ -262,20 +459,14 @@ def _join_s2_with_cloud_prob(roi: "ee.Geometry", start: "ee.Date", end: "ee.Date
     return ee.ImageCollection(joined)
 
 
-def _mask_s2_clouds_full(image: "ee.Image", prob_threshold: float = 40.0) -> "ee.Image":
+def _mask_s2_clouds_full(image: "ee.Image", prob_threshold: float = 40.0, use_scl: bool = True) -> "ee.Image":
     qa = image.select("QA60")
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
     qa60_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
 
-    # SỬA LỖI (2026-09-18): test property GỐC (chưa ép kiểu) làm condition
-    # trước, chỉ ép ee.Image(...) ở NHÁNH TRUE. Bản trước ép ee.Image(...)
-    # NGAY khi gán biến rồi mới đưa vào ee.Algorithms.If — nếu ngày nào đó
-    # S2_SR_HARMONIZED không có ảnh S2_CLOUD_PROBABILITY khớp system:index
-    # (join saveFirst không ra kết quả, hiếm nhưng có thể xảy ra ở vùng/ngày
-    # rìa dữ liệu), property "cloud_prob" là null -> ép ee.Image(null) lỗi
-    # ngay tại bước tính condition, TRƯỚC KHI If kịp rẽ sang nhánh false ->
-    # nhánh "test rồi mới ép kiểu" mất tác dụng, cả ngày đó bị văng exception.
+    # Test property gốc làm condition, chỉ ép ee.Image ở nhánh TRUE (nếu không
+    # có ảnh cloud-prob khớp system:index thì không ném exception).
     cloud_prob_raw = image.get("cloud_prob")
     s2cloudless_mask = ee.Algorithms.If(
         cloud_prob_raw,
@@ -283,44 +474,64 @@ def _mask_s2_clouds_full(image: "ee.Image", prob_threshold: float = 40.0) -> "ee
         ee.Image.constant(1),
     )
     final_mask = qa60_mask.And(ee.Image(s2cloudless_mask))
+
+    if use_scl:
+        scl = image.select("SCL")
+        # SCL: 1 = saturated/defective, 3 = cloud shadows (s2cloudless không bắt bóng mây)
+        final_mask = final_mask.And(scl.neq(3)).And(scl.neq(1))
     return image.updateMask(final_mask)
 
 
-def get_sentinel2_features(roi: "ee.Geometry", target_date_str: str, window_days: int = 3) -> "ee.Image":
-    """NDVI/NDBI/NDWI từ Sentinel-2 Level-2A (Surface Reflectance), lọc mây
-    bằng QA60 + s2cloudless, median trong cửa sổ +-window_days quanh t.
-    Resample BILINEAR trước khi đưa về lưới 30m/EPSG:32648 — đúng đề cương
-    (biến liên tục dùng bilinear, không phải nearest-neighbor mặc định)."""
-    t_date = ee.Date(target_date_str)
-    start = t_date.advance(-window_days, "day")
-    end = t_date.advance(window_days + 1, "day")
+def _prep_s2_image(image: "ee.Image") -> "ee.Image":
+    return _mask_s2_clouds_full(image).select(S2_BANDS).resample("bilinear")
 
-    s2_col = _join_s2_with_cloud_prob(roi, start, end).map(_mask_s2_clouds_full)
-    s2_img = s2_col.median()
+
+def get_sentinel2_features(
+    roi: "ee.Geometry",
+    target_date_str: str,
+    back_days: int = S2_BACK_DAYS,
+    fwd_days: int = S2_FWD_DAYS,
+) -> "ee.Image":
+    """NDVI/NDBI/NDWI (+ dải QA s2_n_img = số ảnh S2 trong cửa sổ) từ Sentinel-2
+    L2A, median trong [t - back_days, t + fwd_days]. fwd_days mặc định 0 = KHÔNG
+    dùng ảnh sau t (chống rò rỉ tương lai). Cửa sổ không có ảnh nào -> ảnh bị
+    mask hoàn toàn (mẫu bị loại, KHÔNG nội suy, KHÔNG văng exception).
+
+    Không .reproject(): lưới EPSG:32648/30 m do reduce_at_points chỉ định lúc
+    lấy mẫu; bilinear đã gắn vào từng ảnh đầu vào."""
+    t_date = ee.Date(target_date_str)
+    start = t_date.advance(-back_days, "day")
+    end = t_date.advance(fwd_days + 1, "day")
+
+    s2_col = _join_s2_with_cloud_prob(roi, start, end).map(_prep_s2_image)
+    n_img = s2_col.size()
+    s2_img = ee.Image(ee.Algorithms.If(n_img.gt(0), s2_col.median(), _masked_image(S2_BANDS)))
 
     ndvi = s2_img.normalizedDifference(["B8", "B4"]).rename("NDVI")
     ndbi = s2_img.normalizedDifference(["B11", "B8"]).rename("NDBI")
     ndwi = s2_img.normalizedDifference(["B3", "B8"]).rename("NDWI")
-    return (
-        ee.Image.cat([ndvi, ndbi, ndwi])
-        .resample("bilinear")
-        .reproject(crs="EPSG:32648", scale=30)
-    )
+    n_band = ee.Image.constant(n_img).rename("s2_n_img").toFloat()
+    return ee.Image.cat([ndvi, ndbi, ndwi, n_band])
 
 
 # ---------------------------------------------------------------------
 # ERA5-LAND: 5 biến, CHỈ tại thời điểm hiện tại t (không lag), khớp theo
-#            giờ chụp thật trong cửa sổ ±60 phút (±1 giờ đúng đề cương)
+#            giờ chụp thật trong cửa sổ ±60 phút; thiếu ERA5 -> ảnh mask
 # ---------------------------------------------------------------------
 
 ERA5_COLLECTION = "ECMWF/ERA5_LAND/HOURLY"
 ERA5_VARS = ["Temp_2m", "Precip", "Humidity", "Wind", "Solar"]
+ERA5_RAW_BANDS = [
+    "temperature_2m",
+    "dewpoint_temperature_2m",
+    "u_component_of_wind_10m",
+    "v_component_of_wind_10m",
+    "total_precipitation_hourly",
+    "surface_solar_radiation_downwards_hourly",
+]
 
 
-def _get_era5_image_at(roi: "ee.Geometry", ee_date: "ee.Date", window_minutes: int = 60) -> "ee.Image":
-    """Bản ghi ERA5-Land gần nhất với ee_date, trong cửa sổ +-window_minutes
-    phút. Mặc định 60 phút = đúng "±1 giờ" ghi trong đề cương (bản trước
-    dùng 90 phút do nhầm lẫn)."""
+def _get_era5_sorted(roi: "ee.Geometry", ee_date: "ee.Date", window_minutes: int = 60) -> "ee.ImageCollection":
     col = (
         ee.ImageCollection(ERA5_COLLECTION)
         .filterBounds(roi)
@@ -331,54 +542,51 @@ def _get_era5_image_at(roi: "ee.Geometry", ee_date: "ee.Date", window_minutes: i
         diff = ee.Number(img.get("system:time_start")).subtract(ee_date.millis()).abs()
         return img.set("time_diff", diff)
 
-    return col.map(add_diff).sort("time_diff").first()
+    return col.map(add_diff).sort("time_diff")
 
 
 def get_era5_features(roi: "ee.Geometry", ee_date_t: "ee.Date", window_minutes: int = 60) -> "ee.Image":
-    """ERA5-Land CHỈ tại thời điểm hiện tại t (đúng đề cương — không lấy độ
-    trễ t-1/t-3/t-7, tuyệt đối không lấy dữ liệu ERA5 ở thời điểm tương lai
-    t+delta_t để tránh Data Leakage)."""
-    img = _get_era5_image_at(roi, ee_date_t, window_minutes)
+    """ERA5-Land CHỈ tại thời điểm hiện tại t (không lag, tuyệt đối không lấy
+    ERA5 ở t+delta_t -> không rò rỉ). Trả về 5 biến ERA5_VARS + dải QA
+    era5_dt_min (độ lệch phút giữa bản ghi ERA5 và giờ chụp thật). Không có bản
+    ghi ERA5 trong cửa sổ -> ảnh mask hoàn toàn (mẫu bị loại)."""
+    col = _get_era5_sorted(roi, ee_date_t, window_minutes)
+    img = ee.Image(
+        ee.Algorithms.If(
+            col.size().gt(0),
+            col.first().select(ERA5_RAW_BANDS),
+            _masked_image(ERA5_RAW_BANDS).set("time_diff", -1),
+        )
+    )
+    dt_min = ee.Number(img.get("time_diff")).divide(60000)
 
-    temp_k = img.select("temperature_2m")
-    dew_k = img.select("dewpoint_temperature_2m")
-    temp_c = temp_k.subtract(273.15)
-    dew_c = dew_k.subtract(273.15)
+    # Resample bilinear gắn lên ẢNH GỐC (projection cố định ~9 km) rồi mới tính
+    # biểu thức -> khi lấy mẫu ở lưới 30 m, GEE nội suy song tuyến từ lưới ERA5.
+    img = img.resample("bilinear")
 
-    # Độ ẩm tương đối tính từ nhiệt độ + điểm sương bằng công thức Magnus-Tetens
+    temp_c = img.select("temperature_2m").subtract(273.15)
+    dew_c = img.select("dewpoint_temperature_2m").subtract(273.15)
+
+    # Độ ẩm tương đối từ nhiệt độ + điểm sương (Magnus-Tetens)
     humidity = temp_c.expression(
         "100 * exp((17.625*Td)/(243.04+Td)) / exp((17.625*T)/(243.04+T))",
         {"T": temp_c, "Td": dew_c},
     ).rename("Humidity")
 
-    u = img.select("u_component_of_wind_10m")
-    v = img.select("v_component_of_wind_10m")
-    wind = u.hypot(v).rename("Wind")
+    wind = img.select("u_component_of_wind_10m").hypot(img.select("v_component_of_wind_10m")).rename("Wind")
+    precip = img.select("total_precipitation_hourly").multiply(1000).rename("Precip")  # m/h -> mm/h
+    solar = img.select("surface_solar_radiation_downwards_hourly").divide(3600).rename("Solar")  # J/m2 -> W/m2
+    dt_band = ee.Image.constant(dt_min).rename("era5_dt_min").toFloat()
 
-    # total_precipitation_hourly: mét/giờ -> đổi sang mm/giờ cho dễ đọc
-    precip = img.select("total_precipitation_hourly").multiply(1000).rename("Precip")
-
-    # surface_solar_radiation_downwards_hourly: J/m2 cộng dồn trong giờ -> W/m2 trung bình
-    solar = img.select("surface_solar_radiation_downwards_hourly").divide(3600).rename("Solar")
-
-    temp_c_named = temp_c.rename("Temp_2m")
-
-    return (
-        ee.Image.cat([temp_c_named, precip, humidity, wind, solar])
-        .resample("bilinear")
-        .reproject(crs="EPSG:32648", scale=30)
-    )
+    return ee.Image.cat([temp_c.rename("Temp_2m"), precip, humidity, wind, solar, dt_band])
 
 
 # ---------------------------------------------------------------------
-# Phân loại mùa / bề mặt — DÙNG CHUNG cho 07 (SUHII) và 08 (ablation), để
-# tránh 2 nơi định nghĩa lệch nhau
+# Phân loại mùa / bề mặt — DÙNG CHUNG cho 07 (SUHII) và 08 (ablation)
 # ---------------------------------------------------------------------
 
 def classify_season(date_series) -> "np.ndarray":
     """Mùa mưa TP.HCM: tháng 5-11. Mùa khô: tháng 12-4."""
-    import pandas as pd
-
     month = pd.to_datetime(date_series).dt.month
     return np.where(month.isin([5, 6, 7, 8, 9, 10, 11]), "Mùa mưa", "Mùa khô")
 
@@ -391,34 +599,16 @@ def classify_surface(df) -> "np.ndarray":
 
 
 # ---------------------------------------------------------------------
-# Danh sách feature cột chuẩn — 04/05/06/07/08/09 PHẢI dùng đúng danh sách
+# Danh sách feature cột chuẩn — 04/05/06/07/08/09/10 PHẢI dùng đúng danh sách
 # này (import trực tiếp, không copy lại)
 # ---------------------------------------------------------------------
 
 FEATURE_COLS = ["LST_t", "NDVI", "NDBI", "NDWI"] + ERA5_VARS + ["delta_t"]
-# delta_t (số ngày chờ tới kỳ ảnh khả dụng tiếp theo) NẰM TRONG FEATURE_COLS
-# — đúng mục 3 đề cương: "Biến thời gian (Delta t)... được đưa vào mô hình
-# như một đặc trưng (feature) độc lập giúp mô hình nhận thức được khoảng
-# thời gian dự báo xa hay gần." (KHÁC bản trước — bản trước loại delta_t ra
-# do hiểu theo bản đề cương CŨ "bài toán t+7 cố định").
+# delta_t NẰM TRONG FEATURE_COLS — đúng mục 3 đề cương (feature độc lập cho biết
+# khoảng dự báo xa hay gần).
 
-
-def init_ee(project_id: str) -> None:
-    try:
-        ee.Initialize(project=project_id)
-    except Exception:
-        print("Chưa xác thực hoặc chưa Initialize được — chạy Authenticate...")
-        ee.Authenticate()
-        ee.Initialize(project=project_id)
-    print(f"✅ Earth Engine sẵn sàng (project: {project_id})")
-
-
-def load_boundary_geom(geojson_path: str) -> "ee.Geometry":
-    import json
-
-    with open(geojson_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return ee.FeatureCollection(data).geometry()
+# Cột QA/metadata đi kèm dataset (KHÔNG phải feature của model)
+QA_COLS = ["era5_dt_min", "s2_n_img", "st_unc_t", "st_unc_target"]
 
 
 if __name__ == "__main__":
@@ -430,7 +620,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_ee(args.project)
-    roi = load_boundary_geom(args.boundary)
+    roi = load_boundary_roi(args.boundary)
 
     test_date = "2024-03-01"
     print(f"\n[TESTING] Đang trích xuất đặc trưng cho ngày: {test_date}")
@@ -438,16 +628,17 @@ if __name__ == "__main__":
     s2 = get_sentinel2_features(roi, test_date)
     era5 = get_era5_features(roi, ee.Date(test_date))
 
-    print("\n--- Sentinel-2 (SR) Features (đã bilinear resample) ---")
-    print("Bands:", s2.bandNames().getInfo())
+    print("\n--- Sentinel-2 (SR) Features ---")
+    print("Bands:", ee_retry(lambda: s2.bandNames().getInfo()), "(kỳ vọng NDVI, NDBI, NDWI, s2_n_img)")
 
     print("\n--- ERA5-Land Features (chỉ tại t, cửa sổ ±60 phút) ---")
-    era5_bands = era5.bandNames().getInfo()
-    print("Bands:", era5_bands, f"(kỳ vọng {len(ERA5_VARS)})")
+    print("Bands:", ee_retry(lambda: era5.bandNames().getInfo()), f"(kỳ vọng {len(ERA5_VARS)} biến + era5_dt_min)")
+
+    print("\n--- Ngày mới nhất của từng nguồn (để biết giới hạn dữ liệu) ---")
+    for name, cid in [("ERA5-Land", ERA5_COLLECTION), ("Landsat 8", "LANDSAT/LC08/C02/T1_L2"),
+                      ("Landsat 9", "LANDSAT/LC09/C02/T1_L2"), ("Sentinel-2 SR", S2_SR_COLLECTION)]:
+        print(f"   {name:<14}: {get_collection_max_date(cid)}")
 
     print("\n--- Danh sách FEATURE_COLS chuẩn dùng cho model ---")
     print(FEATURE_COLS, f"(tổng {len(FEATURE_COLS)} feature — gồm cả delta_t)")
-
-    print("\n⚠️  QUAN TRỌNG: kiểm tra danh sách band ERA5 ở trên có báo lỗi gì không")
-    print("   (band name sai sẽ khiến getInfo() phía trên ném exception ngay tại đây).")
-    print("✅ Nếu chạy tới dòng này không lỗi -> tên băng ERA5-Land dùng trong file là đúng.")
+    print("✅ Nếu chạy tới dòng này không lỗi -> tên băng/collection dùng trong file là đúng.")
