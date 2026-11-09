@@ -1,0 +1,8 @@
+# Nhóm script nâng cấp khoa học (11–16, 10b) — CHỈ các gói MỚI so với requirements.txt hiện có của đồ án.
+# Cài vào đúng môi trường đang chạy 01–10 (vd conda env lst-thesis):
+#     pip install -r requirements_nhom1.txt
+# Các gói còn lại (pandas, numpy, scipy, scikit-learn, xgboost>=2.0, matplotlib, esda, libpysal, geopandas, sqlalchemy,
+# geoalchemy2, psycopg2-binary) đã có trong requirements.txt của bạn.
+lightgbm>=4.0
+catboost>=1.2
+optuna>=3.5
